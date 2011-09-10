@@ -166,6 +166,7 @@ d3.layout.js: \
 	src/layout/bundle.js \
 	src/layout/chord.js \
 	src/layout/force.js \
+	src/layout/sph.js \
 	src/layout/partition.js \
 	src/layout/pie.js \
 	src/layout/stack.js \
