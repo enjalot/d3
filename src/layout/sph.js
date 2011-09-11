@@ -5,15 +5,17 @@ d3.layout.sph = function() {
         event = d3.dispatch("tick"),
         size = [1, 1],
         drag,
-        dt,
+        dt = .001,
         //constants
         gravity = 9.8,
         rho0 = 1000,                  //rest density [ kg/m^3 ]
         VF = .0262144,                //simulation volume [ m^3 ]
-        maxnum = 1024,               //won't actually simulate with this many
-        K = 1,                     //gas constant
+        maxnum = 1000,               //won't actually simulate with this many
+        K = 15,                     //gas constant
         velocity_limit = 600,
         xsph_factor = .2,
+        boundary_stiffness = 10000,
+        boundary_dampening = 500,
         interval,
         VP,
         m,      //mass
@@ -28,8 +30,32 @@ d3.layout.sph = function() {
         screen_radius,
         poly6_coeff,
         dspiky_coeff,
+        not_playing = true,
         nodes = [];
-               
+
+    // Find the nodes within cell
+    //function find(quadtree, x0, y0, x3, y3) {
+    function find(quadtree, node) 
+    {
+        //make bounding box around node, should probably move rr and diag out to save computation
+        rr = node.radius * node.radius;
+        //rr = smoothing_radius * smoothing_radius;
+        diag = 2*Math.sqrt(rr); 
+        x0 = node.x - diag;
+        y0 = node.y - diag;
+        x3 = node.x + diag;
+        y3 = node.y + diag;
+        var points = [];
+        quadtree.visit(function(node, x1, y1, x2, y2) 
+        {
+            var p = node.point;
+            if (p && (p.x >= x0) && (p.x < x3) && (p.y >= y0) && (p.y < y3)) points.push(p);
+            return x1 >= x3 || y1 >= y3 || x2 < x0 || y2 < y0;
+        });
+        return points;
+    }
+
+              
 
     //Smoothing kernel functions
     function poly6(r)
@@ -56,37 +82,13 @@ d3.layout.sph = function() {
         return 0;
     }
 
-
-
-    // Find the nodes within cell
-    //function find(quadtree, x0, y0, x3, y3) {
-    function find(quadtree, node) 
-    {
-        //make bounding box around node, should probably move rr and diag out to save computation
-        rr = node.radius * node.radius;
-        //rr = smoothing_radius * smoothing_radius;
-        diag = Math.sqrt(rr); 
-        x0 = node.x - diag;
-        y0 = node.y - diag;
-        x3 = node.x + diag;
-        y3 = node.y + diag;
-        var points = [];
-        quadtree.visit(function(node, x1, y1, x2, y2) 
-        {
-            var p = node.point;
-            if (p && (p.x >= x0) && (p.x < x3) && (p.y >= y0) && (p.y < y3)) points.push(p);
-            return x1 >= x3 || y1 >= y3 || x2 < x0 || y2 < y0;
-        });
-        return points;
-    }
-
-
     function density_calculation(node, neighbors)
     {
         node.density = 0;
         neighbors.forEach(function(d) 
+        //nodes.forEach(function(d) 
         {
-            if (d != node) 
+            //if (d != node) 
             { 
                 var r = { x: (node.x - d.x), y: (node.y - d.y) };
                 r.x *= sim_scale;
@@ -98,22 +100,29 @@ d3.layout.sph = function() {
 
     function force_calculation(pi, neighbors)
     {
-        pi.force = {x: 0, y: 0};
-        pi.xsph = {x: 0, y: 0};
+        //pi.force = {x: 0, y: 0};
+        //pi.xsph = {x: 0, y: 0};
+        pi.force.x = 0;
+        pi.force.y = 0;
+        pi.xsph.x = 0;
+        pi.xsph.y = 0;
 
         di = pi.density;
         Pi = K*(di - rho0);
 
         l = neighbors.length;
+        //l = nodes.length;
         j = -1; while (++j < l)
         {
             pj = neighbors[j];
+            //pj = nodes[j];
             if (pj != pi) 
             { 
-                if(di == 0 || dj == 0) return;
                 var r = { x: (pi.x - pj.x), y: (pi.y - pj.y) };
                 r.x *= sim_scale;
                 r.y *= sim_scale;
+
+                if(r.x*r.x + r.y*r.y > smoothing_radius*smoothing_radius) return;
 
                 var dj = pj.density
                 var Pj = K*(dj - rho0)
@@ -131,20 +140,40 @@ d3.layout.sph = function() {
 
                 if( !isNaN(f.x) && !isNaN(f.y))
                 {
-                    pi.force.x += f.x
-                    pi.force.y += f.y
+                    pi.force.x += f.x;
+                    pi.force.y += f.y;
+                    /*
+                    console.log("force");
+                    console.log(pj + " " + f.x + " " + f.y);
+                    console.log("density");
+                    console.log(di + " " + dj);
+                    */
+                }
+                else
+                {
+                    console.log(pj + " " + f.x + " " + f.y + " dense " + di);
                 }
 
                 //XSPH smoothing
                 var xsph = {x: 0, y: 0};
                 xsph.x = pj.veleval.x - pi.veleval.x
-                xsph.y = pj.veleval.x - pi.veleval.x
-                xsph.x *= 2. * m * poly6(r) / (di + dj)
-                xsph.y *= 2. * m * poly6(r) / (di + dj)
+                xsph.y = pj.veleval.y - pi.veleval.y
+                xsph.x *= 2 * m * poly6(r) / (di + dj)
+                xsph.y *= 2 * m * poly6(r) / (di + dj)
                 pi.xsph.x += xsph.x;
                 pi.xsph.y += xsph.y;
             }
         }
+    }
+
+
+    function repulsion_force(normal, vel, distance)
+    {
+        repulsion = boundary_stiffness * distance;
+        repulsion -= boundary_dampening * (normal.x*vel.x + normal.y*vel.y);
+        normal.x *= repulsion;
+        normal.y *= repulsion;
+        return normal;
     }
 
 
@@ -172,6 +201,7 @@ d3.layout.sph = function() {
             o = nodes[i];
             var nn = find(qt, o);
             density_calculation(o, nn);
+            //density_calculation(o, nodes);
         }
         //force calculation with nn
         i = -1; while (++i < n)
@@ -179,13 +209,74 @@ d3.layout.sph = function() {
             o = nodes[i];
             var nn = find(qt, o);
             force_calculation(o, nn);
+            //force_calculation(o, nodes);
         }
 
-        // position verlet integration
+        //repulsion force from boundaries
+        i = -1; while (++i < n)
+        {
+            p = nodes[i];
+            p.x *= sim_scale;
+            p.y *= sim_scale;
+            var f = { x:0, y:0 };
+            var dmin = {x: 0, y:0};
+            var dmax = {x: size[0] * sim_scale, y: size[1] * sim_scale};
+            var bnd_dist = boundary_distance;
+            //X Min
+            var diff = bnd_dist - (p.x - dmin.x);
+            if(diff > 0)
+            {
+                normal = {x: 1, y: 0};
+                rp = repulsion_force(normal, p.vel, diff);
+                f.x += rp.x;
+                f.y += rp.y;
+            }
+            //X Max
+            diff = bnd_dist - (dmax.x - p.x);
+            if(diff > 0)
+            {
+                normal = {x:-1, y: 0};
+                rp = repulsion_force(normal, p.vel, diff);
+                f.x += rp.x;
+                f.y += rp.y;
+            }
+            //Y Min //js has origin at top so we flip whats usually min and max
+            diff = bnd_dist - (dmax.y - p.y);
+            //if(p == 0) console.log(bnd_dist + " " + dmax.y + " " + p.y + " " + diff);
+            if(diff > 0)
+            {
+                normal = {x: 0, y: -1};
+                rp = repulsion_force(normal, p.vel, diff);
+                //if(p == 0) console.log(rp.y);
+                f.x += rp.x;
+                f.y += rp.y;
+            }
+            //Y Max
+            diff = bnd_dist - (p.y - dmin.y);
+            if(diff > 0)
+            {
+                normal = {x: 0, y: 1};
+                rp = repulsion_force(normal, p.vel, diff);
+                f.x += rp.x;
+                f.y += rp.y;
+            }
+
+            //console.log("boundary force " + f.x + " " + f.y);
+
+            p.force.x += f.x;
+            p.force.y += f.y;
+            p.x /= sim_scale;
+            p.y /= sim_scale;
+
+
+        }
+
+        // p _forcesition verlet integration
         i = -1; while (++i < n)
         {
             o = nodes[i];
             //handle dragging
+            //console.log(o.density);
         
             //Leapfrog integration
             var vnext = { x:0, y:0 };
@@ -197,21 +288,22 @@ d3.layout.sph = function() {
             var f = o.force; 
 
             //velocity limit 
+            //
             var speed = Math.sqrt(f.x * f.x + f.y * f.y);
+            //console.log(speed);
             if (speed > velocity_limit)
             {
                 f.x *= velocity_limit / speed;
                 f.y *= velocity_limit / speed;
             }
+            //
 
             f.y += gravity;
             vnext.x = o.vel.x + f.x * dt;
             vnext.y = o.vel.y + f.y * dt;
 
-            if( isNaN(o.xsph.x) || isNaN(o.xsph.y)) console.log(o.xsph.x + " " + o.xsph.y);
-
-            //vnext.x += xsph_factor * o.xsph.x;
-            //vnext.y += xsph_factor * o.xsph.y;
+            vnext.x += xsph_factor * o.xsph.x;
+            vnext.y += xsph_factor * o.xsph.y;
             o.x += vnext.x * dt;
             o.y += vnext.y * dt;
 
@@ -225,9 +317,15 @@ d3.layout.sph = function() {
             if (o.fixed) 
             {
                 //console.log("fixed " + o);
+                o.vel.x = 0;
+                o.vel.y = 0;
+                o.veleval.x = 0;
+                o.veleval.y = 0;
                 o.x = o.px;
                 o.y = o.py;
             }
+            o.px = o.x;
+            o.py = o.y;
 
         }
 
@@ -241,7 +339,7 @@ d3.layout.sph = function() {
         //return (dt *= .99) < .005;
         //return dt < .001
         //return true;
-        return false;
+        return not_playing;
     }
 
 
@@ -265,13 +363,13 @@ d3.layout.sph = function() {
     V = max.x * max.y;       //Volume
 
     smoothing_radius = 2.0 * rest_distance;      //smoothing radius for SPH Kernels
-    boundary_distance = .5 * rest_distance;      //for calculating collision with boundary
+    boundary_distance = 1.5 * rest_distance;      //for calculating collision with boundary
     sim_scale = Math.pow((VF / V),(1/3));         //[m^3 / world m^3 ]
     
     h6 = Math.pow(smoothing_radius, 6);
     h9 = Math.pow(smoothing_radius, 9);
-    poly6_coeff = 315/(64.*Math.PI*h9);
-    dspiky_coeff = -45/(Math.PI*h6);
+    poly6_coeff = 315.0/(64.*Math.PI*h9);
+    dspiky_coeff = -45.0/(Math.PI*h6);
 
 
     
@@ -313,13 +411,14 @@ d3.layout.sph = function() {
   };
 
   force.resume = function() {
-    dt = .001;
+    not_playing = false;     
     d3.timer(tick);
     return force;
   };
 
-  force.stop = function() {
-    dt = 0;
+  force.stop = function() 
+  {
+    not_playing = true;     
     return force;
   };
 
@@ -413,6 +512,9 @@ function d3_layout_forceDragEnd() {
 function d3_layout_forceDrag() {
   d3_layout_forceDragNode.px += d3.event.dx;
   d3_layout_forceDragNode.py += d3.event.dy;
+  //d3_layout_forceDragNode.px = d3.event.x;
+  //d3_layout_forceDragNode.py = d3.event.y;
+  //console.log( d3.event);
   d3_layout_forceDragForce.resume(); // restart annealing
 }
 
